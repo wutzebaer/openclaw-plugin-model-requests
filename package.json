@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-model-requests",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenClaw Control UI page listing every model provider request in flight, including compaction and memory flush.",
   "license": "MIT",
   "author": "Peter Großmann",

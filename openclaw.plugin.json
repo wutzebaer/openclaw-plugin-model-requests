@@ -2,7 +2,7 @@
   "id": "model-requests",
   "name": "Model Requests",
   "description": "Lists every HTTP request OpenClaw sends to a model provider, including compaction and memory flush.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
