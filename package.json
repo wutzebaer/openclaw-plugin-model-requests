@@ -1,0 +1,53 @@
+{
+  "name": "openclaw-plugin-model-requests",
+  "version": "0.1.0",
+  "description": "OpenClaw Control UI page listing every model provider request in flight, including compaction and memory flush.",
+  "license": "MIT",
+  "author": "Peter Großmann",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wutzebaer/openclaw-plugin-model-requests.git"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "vllm",
+    "monitoring",
+    "llm"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && openclaw plugins build",
+    "validate": "openclaw plugins validate --json",
+    "pack": "openclaw plugins pack --json",
+    "check": "node check-requests.mjs"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "openclaw": ">=2026.10.5"
+  },
+  "dependencies": {
+    "typebox": "1.3.34"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "controlUi": "./src/control-ui.ts",
+    "compat": {
+      "pluginApi": ">=2026.10.5"
+    },
+    "build": {
+      "openclawVersion": "2026.10.6"
+    }
+  }
+}
