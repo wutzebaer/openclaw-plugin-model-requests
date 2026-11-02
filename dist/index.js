@@ -54,6 +54,8 @@ export default defineFeaturePlugin({
         });
         return {
             list: () => interceptor.snapshot(),
+            busy: () => ({ running: interceptor.runningCount() }),
+            output: ({ id }) => ({ id, text: interceptor.output(id) }),
         };
     },
 });

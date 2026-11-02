@@ -14,6 +14,9 @@ const CHANNELS = {
     error: "undici:request:error",
 };
 const TAIL_CHARS = 160;
+const PROMPT_CHARS = 20_000;
+// Whole streamed output is kept (bounded); finished requests serve it on demand.
+const OUTPUT_BUFFER_CHARS = 200_000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_RUNNING = 50;
@@ -36,6 +39,8 @@ function tail(value, max = TAIL_CHARS) {
     const flat = value.replace(/\s+/g, " ").trim();
     return flat.length > max ? flat.slice(-max) : flat;
 }
+// OpenClaw appends a runtime-context envelope as its own message.
+const RUNTIME_CONTEXT = /OpenClaw runtime context:[\s\S]*?End OpenClaw runtime context\.?/g;
 function normalizeTarget(target) {
     try {
         const url = new URL(target);
@@ -136,16 +141,24 @@ function toolCallNames(message) {
 function describePrompt(body) {
     const list = Array.isArray(body.messages) ? body.messages : Array.isArray(body.input) ? body.input : undefined;
     if (list) {
-        const last = list[list.length - 1];
-        if (!isRecord(last))
-            return { role: "", text: "", count: list.length };
-        const role = str(last.role) || str(last.type);
-        const text = contentText(last.content) ||
-            contentText(last.output) ||
-            str(last.arguments) ||
-            toolCallNames(last) ||
-            "";
-        return { role, text, count: list.length };
+        // OpenClaw appends its runtime-context envelope as its own message; skip
+        // such messages so the preview shows what was actually sent.
+        let fallback;
+        for (let index = list.length - 1; index >= 0; index--) {
+            const message = list[index];
+            if (!isRecord(message))
+                continue;
+            const role = str(message.role) || str(message.type);
+            const text = contentText(message.content) ||
+                contentText(message.output) ||
+                str(message.arguments) ||
+                toolCallNames(message) ||
+                "";
+            fallback ??= { role, text };
+            if (text.replace(RUNTIME_CONTEXT, "").trim())
+                return { role, text, count: list.length };
+        }
+        return { ...(fallback ?? { role: "", text: "" }), count: list.length };
     }
     if (typeof body.prompt === "string")
         return { role: "prompt", text: body.prompt, count: 1 };
@@ -280,7 +293,7 @@ export function startInterceptor(initial) {
             body = JSON.parse(new TextDecoder().decode(bytes));
         }
         catch {
-            item.promptTail = tail(new TextDecoder().decode(bytes.slice(-4096)));
+            item.promptTail = `…${tail(new TextDecoder().decode(bytes.slice(-4096)))}`;
             return;
         }
         if (!isRecord(body))
@@ -292,15 +305,17 @@ export function startInterceptor(initial) {
         const prompt = describePrompt(body);
         item.messageCount = prompt.count;
         item.promptRole = clip(prompt.role, 40);
-        item.promptTail = tail(prompt.text);
+        item.promptTail = prompt.text.slice(0, PROMPT_CHARS);
         item.promptKind = classifyPrompt(prompt.text.slice(-2000));
     };
     const appendOutput = (item, phase, text) => {
         if (!text)
             return;
+        // A new phase (reasoning -> text) starts a new paragraph.
+        const separator = item.outputPhase && item.outputPhase !== phase && item.outputTail ? "\n\n" : "";
         item.outputPhase = phase;
         item.outputChars += text.length;
-        item.outputTail = (item.outputTail + text).slice(-TAIL_CHARS * 2);
+        item.outputTail = (item.outputTail + separator + text).slice(-OUTPUT_BUFFER_CHARS);
     };
     const readUsage = (item, usage) => {
         if (!isRecord(usage))
@@ -359,6 +374,8 @@ export function startInterceptor(initial) {
             if (!line.startsWith("data:"))
                 continue;
             const data = line.slice(5).trim();
+            if (data === "[DONE]")
+                item.sseDone = true;
             if (!data || data === "[DONE]")
                 continue;
             try {
@@ -430,6 +447,7 @@ export function startInterceptor(initial) {
             compactionSessionKey: activeCompaction.length === 1 ? activeCompaction[0] : "",
             decoder: undefined,
             sseLine: "",
+            sseDone: false,
             sse: false,
             jsonChunks: [],
             jsonBytes: 0,
@@ -508,6 +526,9 @@ export function startInterceptor(initial) {
         const item = tracked(message);
         if (!item || !isRecord(message))
             return;
+        // Clients abort the socket once [DONE] arrives; that is a finished stream, not a cancel.
+        if (item.sseDone && isAbort(message.error))
+            return finish(item, "done");
         item.error = errorText(message.error);
         finish(item, isAbort(message.error) ? "aborted" : "error");
     };
@@ -534,7 +555,7 @@ export function startInterceptor(initial) {
     });
     for (const [name, listener] of safe)
         diagnostics.subscribe(name, listener);
-    const toEntry = (item) => {
+    const toEntry = (item, withOutput) => {
         if (item.state !== "sending")
             parseBody(item);
         const call = item.traceSpanId ? modelCalls.get(item.traceSpanId) : undefined;
@@ -551,9 +572,9 @@ export function startInterceptor(initial) {
             messageCount: item.messageCount,
             bodyBytes: item.bodyBytes,
             promptRole: item.promptRole,
-            promptTail: clip(item.promptTail, 400),
+            promptTail: item.promptTail,
             outputPhase: clip(item.outputPhase, 40),
-            outputTail: tail(item.outputTail),
+            outputTail: withOutput ? item.outputTail.trimEnd() : "",
             outputChars: item.outputChars,
             promptTokens: item.promptTokens,
             completionTokens: item.completionTokens,
@@ -569,14 +590,23 @@ export function startInterceptor(initial) {
         };
     };
     const interceptor = {
+        output(id) {
+            const item = running.get(id) ?? recent.find((entry) => entry.id === id);
+            return item ? item.outputTail.trimEnd() : "";
+        },
+        runningCount() {
+            prune(Date.now());
+            return running.size;
+        },
         snapshot() {
             const now = Date.now();
             prune(now);
             return {
                 now,
                 targets: options.targets.slice(0, 20).map((target) => clip(target, 400)),
-                running: [...running.values()].map(toEntry),
-                recent: recent.map(toEntry),
+                running: [...running.values()].map((item) => toEntry(item, true)),
+                // Finished output never changes; the page fetches it once via output().
+                recent: recent.map((item) => toEntry(item, false)),
             };
         },
         noteModelCall(note) {

@@ -9,8 +9,9 @@ For each request the page shows:
 - **State and elapsed time:** `sending`, `waiting for model` (prefill or the server's own queue), `streaming`, `done`, `error`, or `aborted`.
 - **Kind:** agent turn, compaction, memory flush, subagent, and so on.
 - **Session, agent, and run,** when the request comes from the agent runner.
-- **The last 160 characters of the prompt,** meaning the final message in the request.
-- **The tail of the streamed output** (reasoning, text, or tool call), plus token usage once the server reports it.
+- **The last message of the prompt** in full (up to 20,000 characters), skipping OpenClaw's trailing runtime-context envelope.
+- **The streamed output so far** (reasoning, text, and tool calls) in a scroll box. While a request runs, the box follows the stream unless you scroll up; for finished requests it is a drawer that loads the output only when opened. Token usage is added once the server reports it.
+- **A spinner on the sidebar entry** while any model request is in flight.
 - **Request details:** body size, message count, `max_tokens`, and time to first byte.
 - **Origin:** the OpenClaw call stack that issued the request.
 

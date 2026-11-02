@@ -14,6 +14,8 @@ export type Copy = {
   kinds: Record<RequestKind, string>;
   prompt: string;
   output: string;
+  chars: string;
+  loading: string;
   origin: string;
   session: string;
   messages: (count: number) => string;
@@ -50,8 +52,10 @@ const english: Copy = {
     embedding: "embedding",
     other: "other",
   },
-  prompt: "Prompt, last 160 chars",
+  prompt: "Prompt, last message",
   output: "Output",
+  chars: "chars",
+  loading: "Loading…",
   origin: "Origin (call stack)",
   session: "Session",
   messages: (count) => (count === 1 ? "1 message" : `${count} messages`),
@@ -88,8 +92,10 @@ const german: Copy = {
     embedding: "Embedding",
     other: "Sonstiges",
   },
-  prompt: "Prompt, letzte 160 Zeichen",
+  prompt: "Prompt, letzte Nachricht",
   output: "Ausgabe",
+  chars: "Zeichen",
+  loading: "Wird geladen…",
   origin: "Herkunft (Aufrufstapel)",
   session: "Session",
   messages: (count) => (count === 1 ? "1 Nachricht" : `${count} Nachrichten`),

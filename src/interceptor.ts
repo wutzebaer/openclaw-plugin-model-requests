@@ -17,6 +17,9 @@ const CHANNELS = {
 } as const;
 
 const TAIL_CHARS = 160;
+const PROMPT_CHARS = 20_000;
+// Whole streamed output is kept (bounded); finished requests serve it on demand.
+const OUTPUT_BUFFER_CHARS = 200_000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_RUNNING = 50;
@@ -62,6 +65,7 @@ type Tracked = {
   compactionSessionKey: string;
   decoder: TextDecoder | undefined;
   sseLine: string;
+  sseDone: boolean;
   sse: boolean;
   jsonChunks: Uint8Array[];
   jsonBytes: number;
@@ -79,6 +83,8 @@ type Tracked = {
 
 type Interceptor = {
   snapshot: () => RequestSnapshot;
+  runningCount: () => number;
+  output: (id: string) => string;
   noteModelCall: (note: ModelCallNote) => void;
   noteCompaction: (sessionKey: string, active: boolean) => void;
   dispose: () => void;
@@ -102,6 +108,9 @@ function tail(value: string, max = TAIL_CHARS): string {
   const flat = value.replace(/\s+/g, " ").trim();
   return flat.length > max ? flat.slice(-max) : flat;
 }
+
+// OpenClaw appends a runtime-context envelope as its own message.
+const RUNTIME_CONTEXT = /OpenClaw runtime context:[\s\S]*?End OpenClaw runtime context\.?/g;
 
 function normalizeTarget(target: string): string {
   try {
@@ -192,16 +201,23 @@ function toolCallNames(message: Record_): string {
 function describePrompt(body: Record_): { role: string; text: string; count: number } {
   const list = Array.isArray(body.messages) ? body.messages : Array.isArray(body.input) ? body.input : undefined;
   if (list) {
-    const last = list[list.length - 1];
-    if (!isRecord(last)) return { role: "", text: "", count: list.length };
-    const role = str(last.role) || str(last.type);
-    const text =
-      contentText(last.content) ||
-      contentText(last.output) ||
-      str(last.arguments) ||
-      toolCallNames(last) ||
-      "";
-    return { role, text, count: list.length };
+    // OpenClaw appends its runtime-context envelope as its own message; skip
+    // such messages so the preview shows what was actually sent.
+    let fallback: { role: string; text: string } | undefined;
+    for (let index = list.length - 1; index >= 0; index--) {
+      const message = list[index];
+      if (!isRecord(message)) continue;
+      const role = str(message.role) || str(message.type);
+      const text =
+        contentText(message.content) ||
+        contentText(message.output) ||
+        str(message.arguments) ||
+        toolCallNames(message) ||
+        "";
+      fallback ??= { role, text };
+      if (text.replace(RUNTIME_CONTEXT, "").trim()) return { role, text, count: list.length };
+    }
+    return { ...(fallback ?? { role: "", text: "" }), count: list.length };
   }
   if (typeof body.prompt === "string") return { role: "prompt", text: body.prompt, count: 1 };
   if (typeof body.input === "string") return { role: "input", text: body.input, count: 1 };
@@ -318,7 +334,7 @@ export function startInterceptor(initial: InterceptorOptions): Interceptor {
     try {
       body = JSON.parse(new TextDecoder().decode(bytes));
     } catch {
-      item.promptTail = tail(new TextDecoder().decode(bytes.slice(-4096)));
+      item.promptTail = `…${tail(new TextDecoder().decode(bytes.slice(-4096)))}`;
       return;
     }
     if (!isRecord(body)) return;
@@ -329,15 +345,17 @@ export function startInterceptor(initial: InterceptorOptions): Interceptor {
     const prompt = describePrompt(body);
     item.messageCount = prompt.count;
     item.promptRole = clip(prompt.role, 40);
-    item.promptTail = tail(prompt.text);
+    item.promptTail = prompt.text.slice(0, PROMPT_CHARS);
     item.promptKind = classifyPrompt(prompt.text.slice(-2000));
   };
 
   const appendOutput = (item: Tracked, phase: string, text: string) => {
     if (!text) return;
+    // A new phase (reasoning -> text) starts a new paragraph.
+    const separator = item.outputPhase && item.outputPhase !== phase && item.outputTail ? "\n\n" : "";
     item.outputPhase = phase;
     item.outputChars += text.length;
-    item.outputTail = (item.outputTail + text).slice(-TAIL_CHARS * 2);
+    item.outputTail = (item.outputTail + separator + text).slice(-OUTPUT_BUFFER_CHARS);
   };
 
   const readUsage = (item: Tracked, usage: unknown) => {
@@ -389,6 +407,7 @@ export function startInterceptor(initial: InterceptorOptions): Interceptor {
       const line = raw.trimEnd();
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
+      if (data === "[DONE]") item.sseDone = true;
       if (!data || data === "[DONE]") continue;
       try {
         const event = JSON.parse(data);
@@ -452,6 +471,7 @@ export function startInterceptor(initial: InterceptorOptions): Interceptor {
       compactionSessionKey: activeCompaction.length === 1 ? activeCompaction[0] : "",
       decoder: undefined,
       sseLine: "",
+      sseDone: false,
       sse: false,
       jsonChunks: [],
       jsonBytes: 0,
@@ -526,6 +546,8 @@ export function startInterceptor(initial: InterceptorOptions): Interceptor {
   const onError = (message: unknown) => {
     const item = tracked(message);
     if (!item || !isRecord(message)) return;
+    // Clients abort the socket once [DONE] arrives; that is a finished stream, not a cancel.
+    if (item.sseDone && isAbort(message.error)) return finish(item, "done");
     item.error = errorText(message.error);
     finish(item, isAbort(message.error) ? "aborted" : "error");
   };
@@ -552,7 +574,7 @@ export function startInterceptor(initial: InterceptorOptions): Interceptor {
   });
   for (const [name, listener] of safe) diagnostics.subscribe(name, listener);
 
-  const toEntry = (item: Tracked): RequestEntry => {
+  const toEntry = (item: Tracked, withOutput: boolean): RequestEntry => {
     if (item.state !== "sending") parseBody(item);
     const call = item.traceSpanId ? modelCalls.get(item.traceSpanId) : undefined;
     const kind: RequestKind =
@@ -569,9 +591,9 @@ export function startInterceptor(initial: InterceptorOptions): Interceptor {
       messageCount: item.messageCount,
       bodyBytes: item.bodyBytes,
       promptRole: item.promptRole,
-      promptTail: clip(item.promptTail, 400),
+      promptTail: item.promptTail,
       outputPhase: clip(item.outputPhase, 40),
-      outputTail: tail(item.outputTail),
+      outputTail: withOutput ? item.outputTail.trimEnd() : "",
       outputChars: item.outputChars,
       promptTokens: item.promptTokens,
       completionTokens: item.completionTokens,
@@ -588,14 +610,23 @@ export function startInterceptor(initial: InterceptorOptions): Interceptor {
   };
 
   const interceptor: Interceptor = {
+    output(id) {
+      const item = running.get(id) ?? recent.find((entry) => entry.id === id);
+      return item ? item.outputTail.trimEnd() : "";
+    },
+    runningCount() {
+      prune(Date.now());
+      return running.size;
+    },
     snapshot() {
       const now = Date.now();
       prune(now);
       return {
         now,
         targets: options.targets.slice(0, 20).map((target) => clip(target, 400)),
-        running: [...running.values()].map(toEntry),
-        recent: recent.map(toEntry),
+        running: [...running.values()].map((item) => toEntry(item, true)),
+        // Finished output never changes; the page fetches it once via output().
+        recent: recent.map((item) => toEntry(item, false)),
       };
     },
     noteModelCall(note) {

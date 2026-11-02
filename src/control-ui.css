@@ -68,14 +68,10 @@
 }
 
 .model-requests-badge[data-state="waiting"],
-.model-requests-badge[data-state="sending"] {
+.model-requests-badge[data-state="sending"],
+.model-requests-badge[data-state="streaming"] {
   color: var(--warn);
   border-color: var(--warn);
-}
-
-.model-requests-badge[data-state="streaming"] {
-  color: var(--accent);
-  border-color: var(--accent);
 }
 
 .model-requests-badge[data-state="done"] {
@@ -87,6 +83,19 @@
 .model-requests-badge[data-state="aborted"] {
   color: var(--danger);
   border-color: var(--danger);
+}
+
+.model-requests-output-drawer > summary {
+  cursor: pointer;
+}
+
+.model-requests-output-drawer > .model-requests-output {
+  margin-top: 4px;
+}
+
+.model-requests-output {
+  height: 24em;
+  overflow-y: auto;
 }
 
 .model-requests-kind {
